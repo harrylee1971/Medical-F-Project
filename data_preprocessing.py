@@ -116,15 +116,43 @@ class KKI2009Dataset(Dataset):
         super().__init__()
         self.patches = []
 
+        # ── 路徑正規化（處理 Windows 反斜線、尾端斜線等問題）──
+        data_dir = os.path.normpath(os.path.abspath(data_dir))
+
+        # ── 確認資料夾存在，並列出內容供除錯 ──
+        if not os.path.isdir(data_dir):
+            print(f"[Error] 資料夾不存在：{data_dir}")
+            return
+
+        all_files = os.listdir(data_dir)
+        nii_files = [f for f in all_files if f.endswith('.nii') or f.endswith('.nii.gz')]
+        print(f"  [路徑] {data_dir}")
+        print(f"  [偵測] 資料夾內共有 {len(all_files)} 個檔案，其中 {len(nii_files)} 個 .nii")
+        if nii_files:
+            print(f"  [範例] {nii_files[:3]}")
+        else:
+            print(f"  [Error] 找不到任何 .nii 檔案！資料夾內容：{all_files[:10]}")
+            return
+
         for sid in subject_ids:
-            # 尋找檔案，支援 01/1 兩種補零格式
-            pattern = os.path.join(data_dir, f"KKI2009-{sid:02d}-MPRAGE.nii*")
-            files = glob.glob(pattern)
-            if not files:
+            # 支援補零和不補零兩種格式
+            candidates = [
+                f"KKI2009-{sid:02d}-MPRAGE.nii",
+                f"KKI2009-{sid:02d}-MPRAGE.nii.gz",
+                f"KKI2009-{sid}-MPRAGE.nii",
+                f"KKI2009-{sid}-MPRAGE.nii.gz",
+            ]
+            path = None
+            for c in candidates:
+                full = os.path.join(data_dir, c)
+                if os.path.isfile(full):
+                    path = full
+                    break
+
+            if path is None:
                 print(f"[Warning] 找不到 subject {sid:02d}，跳過")
                 continue
 
-            path = files[0]
             print(f"  載入 {os.path.basename(path)} ...")
             hr = normalize(load_nii(path))
             lr = generate_lr(hr, scale=scale)
@@ -159,6 +187,11 @@ def get_dataloaders(data_dir: str,
     回傳 (train_loader, test_loader)
     訓練集: KKI13~42, 測試集: KKI01~05
     """
+    # Windows 上 num_workers > 0 會造成 multiprocessing 問題，自動偵測
+    import platform
+    if platform.system() == "Windows":
+        num_workers = 0
+
     train_ids = list(range(13, 43))   # 30 筆
     test_ids  = list(range(1, 6))     #  5 筆
 
@@ -167,16 +200,29 @@ def get_dataloaders(data_dir: str,
     print("\n=== 建立測試集 ===")
     test_ds  = KKI2009Dataset(data_dir, test_ids,  scale, patch_size, overlap)
 
+    # 空 dataset 防呆
+    if len(train_ds) == 0:
+        raise RuntimeError(
+            "\n[Error] 訓練集為空！請確認：\n"
+            "  1. --data_dir 路徑指向含有 .nii 檔案的資料夾\n"
+            "  2. 檔名格式為 KKI2009-XX-MPRAGE.nii\n"
+            f"  3. 你指定的路徑: {os.path.abspath(data_dir)}"
+        )
+    if len(test_ds) == 0:
+        raise RuntimeError(
+            "\n[Error] 測試集為空！請確認 KKI2009-01 ~ 05 存在於資料夾中。"
+        )
+
     train_loader = DataLoader(train_ds,
                               batch_size=batch_size,
                               shuffle=True,
                               num_workers=num_workers,
-                              pin_memory=True)
+                              pin_memory=(num_workers == 0))
     test_loader  = DataLoader(test_ds,
                               batch_size=1,
                               shuffle=False,
                               num_workers=num_workers,
-                              pin_memory=True)
+                              pin_memory=(num_workers == 0))
     return train_loader, test_loader
 
 
