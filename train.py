@@ -1,29 +1,25 @@
 """
 train.py
 ========
-DCED 完整訓練 + 評估流程
-
-使用方式：
-  python train.py --data_dir ./data --epochs 80 --batch_size 32
-
-評估指標：PSNR, SSIM, NRMSE（對應論文）
+直接執行即可：python train.py
+所有參數在 config.py 修改。
 """
 
 import os
-import argparse
 import time
 import math
+import glob
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-
 import nibabel as nib
 from skimage.metrics import structural_similarity as ssim_fn
 
-from data_preprocessing import get_dataloaders, KKI2009Dataset, normalize, generate_lr
+import config as cfg
+from data_preprocessing import KKI2009Dataset, normalize, generate_lr
 from model import DCED
 from wavelet_fusion import self_ensemble_inference
 
@@ -32,25 +28,23 @@ from wavelet_fusion import self_ensemble_inference
 # 評估指標
 # ─────────────────────────────────────────────
 
-def psnr(pred: np.ndarray, target: np.ndarray) -> float:
+def psnr(pred, target):
     mse = np.mean((pred - target) ** 2)
     if mse < 1e-10:
         return 100.0
-    return 20 * math.log10(1.0 / math.sqrt(mse))   # 影像已正規化到 [0,1]
+    return 20 * math.log10(1.0 / math.sqrt(mse))
 
-
-def ssim(pred: np.ndarray, target: np.ndarray) -> float:
+def ssim(pred, target):
     return ssim_fn(pred, target, data_range=1.0)
 
-
-def nrmse(pred: np.ndarray, target: np.ndarray) -> float:
+def nrmse(pred, target):
     rmse = math.sqrt(np.mean((pred - target) ** 2))
     norm = math.sqrt(np.mean(target ** 2))
     return rmse / (norm + 1e-8)
 
 
 # ─────────────────────────────────────────────
-# 單 Epoch 訓練
+# 訓練一個 Epoch
 # ─────────────────────────────────────────────
 
 def train_one_epoch(model, loader, optimizer, criterion, device, epoch):
@@ -80,7 +74,7 @@ def train_one_epoch(model, loader, optimizer, criterion, device, epoch):
 
 
 # ─────────────────────────────────────────────
-# Patch-based 評估（用 patch loader）
+# Patch-level 評估
 # ─────────────────────────────────────────────
 
 @torch.no_grad()
@@ -91,53 +85,51 @@ def evaluate_patches(model, loader, device):
     for lr_b, hr_b in loader:
         lr_b = lr_b.to(device)
         pred_b = model(lr_b).cpu().numpy()
-        hr_b   = hr_b.numpy()
+        hr_b = hr_b.numpy()
 
         for pred, gt in zip(pred_b, hr_b):
             pred = pred.squeeze().clip(0, 1)
-            gt   = gt.squeeze()
+            gt = gt.squeeze()
             psnr_list.append(psnr(pred, gt))
             ssim_list.append(ssim(pred, gt))
             nrmse_list.append(nrmse(pred, gt))
 
-    return (np.mean(psnr_list),
-            np.mean(ssim_list),
-            np.mean(nrmse_list))
+    return np.mean(psnr_list), np.mean(ssim_list), np.mean(nrmse_list)
 
 
 # ─────────────────────────────────────────────
-# Volume-level 評估（完整 MRI）
+# Volume-level 評估
 # ─────────────────────────────────────────────
 
 @torch.no_grad()
-def evaluate_volume(model, data_dir, subject_ids, device,
-                    scale=2, use_wavelet=False):
-    """對每個受試者做整體 volume 評估"""
-    import glob
+def evaluate_volume(model, device, use_wavelet=False):
     model.eval()
     results = []
 
-    for sid in subject_ids:
-        pattern = os.path.join(data_dir, f"KKI2009-{sid:02d}-MPRAGE.nii*")
-        files = glob.glob(pattern)
-        if not files:
+    for sid in cfg.TEST_IDS:
+        candidates = [
+            os.path.join(cfg.DATA_DIR, f"KKI2009-{sid:02d}-MPRAGE.nii"),
+            os.path.join(cfg.DATA_DIR, f"KKI2009-{sid:02d}-MPRAGE.nii.gz"),
+        ]
+        path = next((p for p in candidates if os.path.isfile(p)), None)
+        if path is None:
+            print(f"  [Skip] subject {sid:02d} 不存在")
             continue
 
-        hr_np = normalize(nib.load(files[0]).get_fdata(dtype=np.float32))
-        lr_np = generate_lr(hr_np, scale=scale)
+        hr_np = normalize(nib.load(path).get_fdata(dtype=np.float32))
+        lr_np = generate_lr(hr_np, scale=cfg.SCALE)
 
         if use_wavelet:
-            pred_np = self_ensemble_inference(model, lr_np, device)
+            pred_np = self_ensemble_inference(
+                model, lr_np, device, weights=cfg.WAVELET_WEIGHTS)
         else:
             lr_t = torch.from_numpy(lr_np).unsqueeze(0).unsqueeze(0).to(device)
-            pred_t = model(lr_t)
-            pred_np = pred_t.squeeze().cpu().numpy()
+            pred_np = model(lr_t).squeeze().cpu().numpy()
 
-        # 裁切到相同尺寸
-        min_shape = tuple(min(a, b) for a, b in zip(pred_np.shape, hr_np.shape))
-        s = tuple(slice(0, m) for m in min_shape)
+        s = tuple(slice(0, min(a, b))
+                  for a, b in zip(pred_np.shape, hr_np.shape))
         pred_np = pred_np[s].clip(0, 1)
-        hr_np   = hr_np[s]
+        hr_np = hr_np[s]
 
         p = psnr(pred_np, hr_np)
         s_ = ssim(pred_np, hr_np)
@@ -145,176 +137,129 @@ def evaluate_volume(model, data_dir, subject_ids, device,
         results.append((sid, p, s_, n))
         print(f"  KKI{sid:02d}  PSNR={p:.2f} dB  SSIM={s_:.4f}  NRMSE={n:.4f}")
 
-    avg_p  = np.mean([r[1] for r in results])
-    avg_s  = np.mean([r[2] for r in results])
-    avg_n  = np.mean([r[3] for r in results])
-    print(f"\n  平均   PSNR={avg_p:.2f} dB  SSIM={avg_s:.4f}  NRMSE={avg_n:.4f}")
-    return avg_p, avg_s, avg_n
+    if results:
+        print(f"\n  平均  "
+              f"PSNR={np.mean([r[1] for r in results]):.2f} dB  "
+              f"SSIM={np.mean([r[2] for r in results]):.4f}  "
+              f"NRMSE={np.mean([r[3] for r in results]):.4f}")
 
 
 # ─────────────────────────────────────────────
-# 主訓練流程
+# 主程式
 # ─────────────────────────────────────────────
 
-def train(args):
+def main():
     # ── 裝置 ──
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"使用裝置: {device}")
     if torch.cuda.is_available():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
 
-    # ── 資料載入 ──
-    print("\n載入資料集...")
-    train_loader, test_loader = get_dataloaders(
-        data_dir=args.data_dir,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        scale=args.scale,
-        patch_size=args.patch_size,
-        overlap=args.overlap,
-    )
+    # ── 資料集 ──
+    print("\n=== 建立訓練集 ===")
+    train_ds = KKI2009Dataset(cfg.DATA_DIR, cfg.TRAIN_IDS,
+                               cfg.SCALE, cfg.PATCH_SIZE, cfg.OVERLAP)
+    print("\n=== 建立測試集 ===")
+    test_ds  = KKI2009Dataset(cfg.DATA_DIR, cfg.TEST_IDS,
+                               cfg.SCALE, cfg.PATCH_SIZE, cfg.OVERLAP)
+
+    if len(train_ds) == 0:
+        raise RuntimeError(f"訓練集為空！請確認 DATA_DIR：{cfg.DATA_DIR}")
+    if len(test_ds) == 0:
+        raise RuntimeError(f"測試集為空！請確認 DATA_DIR：{cfg.DATA_DIR}")
+
+    # Windows 上 num_workers 必須為 0
+    import platform
+    nw = 0 if platform.system() == "Windows" else 4
+
+    train_loader = DataLoader(train_ds, batch_size=cfg.BATCH_SIZE,
+                              shuffle=True, num_workers=nw)
+    test_loader  = DataLoader(test_ds,  batch_size=1,
+                              shuffle=False, num_workers=nw)
 
     # ── 模型 ──
-    model = DCED(in_channels=1, num_edbs=3, num_filters=32).to(device)
+    model = DCED(cfg.IN_CHANNELS, cfg.NUM_EDBS, cfg.NUM_FILTERS).to(device)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"\n模型參數量: {total_params:,}")
 
-    # ── 損失函數：MSE（EuclideanLoss）──
+    # ── 損失 & 優化器 ──
     criterion = nn.MSELoss()
-
-    # ── 優化器：Adam，lr=1e-4，weight_decay=1e-5 ──
     optimizer = optim.Adam(model.parameters(),
-                           lr=args.lr,
-                           weight_decay=args.weight_decay,
-                           betas=(0.9, 0.999))
+                           lr=cfg.LR,
+                           weight_decay=cfg.WEIGHT_DECAY,
+                           betas=(cfg.MOMENTUM, 0.999))
 
-    # ── 儲存目錄 ──
-    os.makedirs(args.save_dir, exist_ok=True)
+    os.makedirs(cfg.SAVE_DIR, exist_ok=True)
     best_psnr = 0.0
 
     # ── 訓練迴圈 ──
-    print(f"\n開始訓練（共 {args.epochs} epochs）...\n")
-    for epoch in range(1, args.epochs + 1):
-        # 訓練
-        avg_loss = train_one_epoch(model, train_loader,
-                                   optimizer, criterion, device, epoch)
+    print(f"\n開始訓練（共 {cfg.EPOCHS} epochs）...\n")
+    for epoch in range(1, cfg.EPOCHS + 1):
+        avg_loss = train_one_epoch(
+            model, train_loader, optimizer, criterion, device, epoch)
 
-        # 每5 epoch 做 patch-level 評估
-        if epoch % 5 == 0 or epoch == args.epochs:
+        if epoch % cfg.EVAL_EVERY == 0 or epoch == cfg.EPOCHS:
             p, s, n = evaluate_patches(model, test_loader, device)
-            print(f"\nEpoch {epoch}/{args.epochs}  "
-                  f"train_loss={avg_loss:.6f}  "
+            print(f"\nEpoch {epoch}/{cfg.EPOCHS}  "
+                  f"loss={avg_loss:.6f}  "
                   f"PSNR={p:.2f}dB  SSIM={s:.4f}  NRMSE={n:.4f}")
 
-            # 儲存最佳模型
             if p > best_psnr:
                 best_psnr = p
-                ckpt_path = os.path.join(args.save_dir, "dced_best.pth")
-                torch.save({
-                    'epoch': epoch,
-                    'model_state': model.state_dict(),
-                    'optimizer_state': optimizer.state_dict(),
-                    'psnr': p,
-                }, ckpt_path)
-                print(f"  ★ 新最佳 PSNR={p:.2f} dB，儲存至 {ckpt_path}")
+                ckpt = os.path.join(cfg.SAVE_DIR, "dced_best.pth")
+                torch.save({'epoch': epoch,
+                            'model_state': model.state_dict(),
+                            'optimizer_state': optimizer.state_dict(),
+                            'psnr': p}, ckpt)
+                print(f"  ★ 新最佳 PSNR={p:.2f} dB → 儲存至 {ckpt}")
         else:
-            print(f"Epoch {epoch}/{args.epochs}  train_loss={avg_loss:.6f}")
+            print(f"Epoch {epoch}/{cfg.EPOCHS}  loss={avg_loss:.6f}")
 
-        # 每20 epoch 儲存 checkpoint
-        if epoch % 20 == 0:
-            ckpt_path = os.path.join(args.save_dir, f"dced_epoch{epoch}.pth")
-            torch.save({
-                'epoch': epoch,
-                'model_state': model.state_dict(),
-                'optimizer_state': optimizer.state_dict(),
-            }, ckpt_path)
+        if epoch % cfg.SAVE_EVERY == 0:
+            ckpt = os.path.join(cfg.SAVE_DIR, f"dced_epoch{epoch}.pth")
+            torch.save({'epoch': epoch,
+                        'model_state': model.state_dict(),
+                        'optimizer_state': optimizer.state_dict()}, ckpt)
 
-    # ── 最終 Volume-level 評估（含 Wavelet Fusion）──
+    # ── 最終評估 ──
     print("\n=== 最終 Volume-level 評估（不含 Wavelet Fusion）===")
-    evaluate_volume(model, args.data_dir, list(range(1, 6)), device,
-                    scale=args.scale, use_wavelet=False)
+    evaluate_volume(model, device, use_wavelet=False)
 
     print("\n=== 最終 Volume-level 評估（含 3D Wavelet Fusion）===")
-    evaluate_volume(model, args.data_dir, list(range(1, 6)), device,
-                    scale=args.scale, use_wavelet=True)
+    evaluate_volume(model, device, use_wavelet=True)
 
 
 # ─────────────────────────────────────────────
-# 推論腳本（載入已訓練模型）
+# 推論模式（單獨使用）
 # ─────────────────────────────────────────────
 
-def infer(args):
+def infer(checkpoint_path: str):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # 載入模型
-    model = DCED(in_channels=1, num_edbs=3, num_filters=32).to(device)
-    ckpt = torch.load(args.checkpoint, map_location=device)
+    model = DCED(cfg.IN_CHANNELS, cfg.NUM_EDBS, cfg.NUM_FILTERS).to(device)
+    ckpt = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(ckpt['model_state'])
     model.eval()
-    print(f"載入 checkpoint: {args.checkpoint}  (epoch {ckpt.get('epoch', '?')})")
+    print(f"載入 checkpoint: {checkpoint_path}")
 
-    # 載入並推論
-    import glob
-    nii_files = sorted(glob.glob(os.path.join(args.input_dir, "*.nii*")))
-    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
+    nii_files = (glob.glob(os.path.join(cfg.DATA_DIR, "*.nii")) +
+                 glob.glob(os.path.join(cfg.DATA_DIR, "*.nii.gz")))
 
-    for fpath in nii_files:
+    for fpath in sorted(nii_files):
         fname = os.path.basename(fpath)
         print(f"推論: {fname} ...")
-
         img = nib.load(fpath)
         hr_np = normalize(img.get_fdata(dtype=np.float32))
-        lr_np = generate_lr(hr_np, scale=args.scale)
-
-        sr_np = self_ensemble_inference(model, lr_np, device)
-
-        # 儲存為 .nii.gz
-        out_img = nib.Nifti1Image(sr_np, img.affine, img.header)
-        out_path = os.path.join(args.output_dir, fname.replace('.nii', '_SR.nii'))
-        nib.save(out_img, out_path)
-        print(f"  儲存: {out_path}")
-
-
-# ─────────────────────────────────────────────
-# CLI
-# ─────────────────────────────────────────────
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="DCED MRI Super-Resolution")
-    subparsers = parser.add_subparsers(dest="mode")
-
-    # ── train ──
-    train_p = subparsers.add_parser("train")
-    train_p.add_argument("--data_dir",    type=str, required=True)
-    train_p.add_argument("--save_dir",    type=str, default="./checkpoints")
-    train_p.add_argument("--epochs",      type=int, default=80)
-    train_p.add_argument("--batch_size",  type=int, default=32)
-    train_p.add_argument("--num_workers", type=int, default=4)
-    train_p.add_argument("--lr",          type=float, default=1e-4)
-    train_p.add_argument("--weight_decay",type=float, default=1e-5)
-    train_p.add_argument("--scale",       type=int, default=2)
-    train_p.add_argument("--patch_size",  type=int, default=31)
-    train_p.add_argument("--overlap",     type=int, default=16)
-
-    # ── infer ──
-    infer_p = subparsers.add_parser("infer")
-    infer_p.add_argument("--checkpoint",  type=str, required=True)
-    infer_p.add_argument("--input_dir",   type=str, required=True)
-    infer_p.add_argument("--output_dir",  type=str, default="./sr_output")
-    infer_p.add_argument("--scale",       type=int, default=2)
-
-    return parser.parse_args()
+        lr_np = generate_lr(hr_np, scale=cfg.SCALE)
+        sr_np = self_ensemble_inference(
+            model, lr_np, device, weights=cfg.WAVELET_WEIGHTS)
+        out_path = os.path.join(cfg.OUTPUT_DIR,
+                                fname.replace('.nii', '_SR.nii'))
+        nib.save(nib.Nifti1Image(sr_np, img.affine, img.header), out_path)
+        print(f"  → 儲存: {out_path}")
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    if args.mode == "train":
-        train(args)
-    elif args.mode == "infer":
-        infer(args)
-    else:
-        print("請指定 mode: train 或 infer")
-        print("範例：")
-        print("  python train.py train --data_dir ./data --epochs 80")
-        print("  python train.py infer --checkpoint ./checkpoints/dced_best.pth "
-              "--input_dir ./data --output_dir ./results")
+    main()
+    # 若要推論，把上面 main() 換成：
+    # infer(r"C:/Users/user/Desktop/fri/BN5207-Final-Project/checkpoints/dced_best.pth")
