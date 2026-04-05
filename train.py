@@ -1,14 +1,17 @@
 """
 train.py
 ========
-直接執行即可：python train.py
+直接執行：python train.py
 所有參數在 config.py 修改。
+
+評估方式：每個 subject 做整張 volume 評估，再取平均（與論文 Table 3 一致）
 """
 
 import os
 import time
 import math
 import glob
+import platform
 
 import numpy as np
 import torch
@@ -74,35 +77,19 @@ def train_one_epoch(model, loader, optimizer, criterion, device, epoch):
 
 
 # ─────────────────────────────────────────────
-# Patch-level 評估
+# Volume-level 評估（每個 subject 分開，論文做法）
 # ─────────────────────────────────────────────
 
 @torch.no_grad()
-def evaluate_patches(model, loader, device):
-    model.eval()
-    psnr_list, ssim_list, nrmse_list = [], [], []
+def evaluate_per_subject(model, device, use_wavelet=False):
+    """
+    對每個測試 subject 做整張 volume 的評估，最後取平均。
 
-    for lr_b, hr_b in loader:
-        lr_b = lr_b.to(device)
-        pred_b = model(lr_b).cpu().numpy()
-        hr_b = hr_b.numpy()
-
-        for pred, gt in zip(pred_b, hr_b):
-            pred = pred.squeeze().clip(0, 1)
-            gt = gt.squeeze()
-            psnr_list.append(psnr(pred, gt))
-            ssim_list.append(ssim(pred, gt))
-            nrmse_list.append(nrmse(pred, gt))
-
-    return np.mean(psnr_list), np.mean(ssim_list), np.mean(nrmse_list)
-
-
-# ─────────────────────────────────────────────
-# Volume-level 評估
-# ─────────────────────────────────────────────
-
-@torch.no_grad()
-def evaluate_volume(model, device, use_wavelet=False):
+    為什麼不用 patch-level：
+      patch 含大量腦外黑色背景，預測黑色很容易，
+      PSNR 會虛高到 45+ dB，NRMSE 也會爆掉。
+      整張 volume 評估才是論文 Table 3 的做法。
+    """
     model.eval()
     results = []
 
@@ -113,7 +100,7 @@ def evaluate_volume(model, device, use_wavelet=False):
         ]
         path = next((p for p in candidates if os.path.isfile(p)), None)
         if path is None:
-            print(f"  [Skip] subject {sid:02d} 不存在")
+            print(f"    [Skip] KKI{sid:02d} 找不到")
             continue
 
         hr_np = normalize(nib.load(path).get_fdata(dtype=np.float32))
@@ -126,22 +113,25 @@ def evaluate_volume(model, device, use_wavelet=False):
             lr_t = torch.from_numpy(lr_np).unsqueeze(0).unsqueeze(0).to(device)
             pred_np = model(lr_t).squeeze().cpu().numpy()
 
-        s = tuple(slice(0, min(a, b))
-                  for a, b in zip(pred_np.shape, hr_np.shape))
+        s = tuple(slice(0, min(a, b)) for a, b in zip(pred_np.shape, hr_np.shape))
         pred_np = pred_np[s].clip(0, 1)
-        hr_np = hr_np[s]
+        hr_np   = hr_np[s]
 
-        p = psnr(pred_np, hr_np)
+        p  = psnr(pred_np, hr_np)
         s_ = ssim(pred_np, hr_np)
-        n = nrmse(pred_np, hr_np)
+        n  = nrmse(pred_np, hr_np)
         results.append((sid, p, s_, n))
-        print(f"  KKI{sid:02d}  PSNR={p:.2f} dB  SSIM={s_:.4f}  NRMSE={n:.4f}")
+        print(f"    KKI{sid:02d}  PSNR={p:.2f} dB  SSIM={s_:.4f}  NRMSE={n:.4f}")
 
-    if results:
-        print(f"\n  平均  "
-              f"PSNR={np.mean([r[1] for r in results]):.2f} dB  "
-              f"SSIM={np.mean([r[2] for r in results]):.4f}  "
-              f"NRMSE={np.mean([r[3] for r in results]):.4f}")
+    if not results:
+        return 0.0, 0.0, 0.0
+
+    avg_p = np.mean([r[1] for r in results])
+    avg_s = np.mean([r[2] for r in results])
+    avg_n = np.mean([r[3] for r in results])
+    print(f"    {'─'*50}")
+    print(f"    平均   PSNR={avg_p:.2f} dB  SSIM={avg_s:.4f}  NRMSE={avg_n:.4f}")
+    return avg_p, avg_s, avg_n
 
 
 # ─────────────────────────────────────────────
@@ -155,27 +145,16 @@ def main():
     if torch.cuda.is_available():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
 
-    # ── 資料集 ──
+    # ── 訓練集（用 patch 訓練）──
     print("\n=== 建立訓練集 ===")
     train_ds = KKI2009Dataset(cfg.DATA_DIR, cfg.TRAIN_IDS,
                                cfg.SCALE, cfg.PATCH_SIZE, cfg.OVERLAP)
-    print("\n=== 建立測試集 ===")
-    test_ds  = KKI2009Dataset(cfg.DATA_DIR, cfg.TEST_IDS,
-                               cfg.SCALE, cfg.PATCH_SIZE, cfg.OVERLAP)
-
     if len(train_ds) == 0:
         raise RuntimeError(f"訓練集為空！請確認 DATA_DIR：{cfg.DATA_DIR}")
-    if len(test_ds) == 0:
-        raise RuntimeError(f"測試集為空！請確認 DATA_DIR：{cfg.DATA_DIR}")
 
-    # Windows 上 num_workers 必須為 0
-    import platform
     nw = 0 if platform.system() == "Windows" else 4
-
     train_loader = DataLoader(train_ds, batch_size=cfg.BATCH_SIZE,
                               shuffle=True, num_workers=nw)
-    test_loader  = DataLoader(test_ds,  batch_size=1,
-                              shuffle=False, num_workers=nw)
 
     # ── 模型 ──
     model = DCED(cfg.IN_CHANNELS, cfg.NUM_EDBS, cfg.NUM_FILTERS).to(device)
@@ -195,25 +174,29 @@ def main():
     # ── 訓練迴圈 ──
     print(f"\n開始訓練（共 {cfg.EPOCHS} epochs）...\n")
     for epoch in range(1, cfg.EPOCHS + 1):
+
         avg_loss = train_one_epoch(
             model, train_loader, optimizer, criterion, device, epoch)
 
+        # 每 EVAL_EVERY 個 epoch 做 volume-level per-subject 評估
         if epoch % cfg.EVAL_EVERY == 0 or epoch == cfg.EPOCHS:
-            p, s, n = evaluate_patches(model, test_loader, device)
-            print(f"\nEpoch {epoch}/{cfg.EPOCHS}  "
-                  f"loss={avg_loss:.6f}  "
-                  f"PSNR={p:.2f}dB  SSIM={s:.4f}  NRMSE={n:.4f}")
+            print(f"\nEpoch {epoch}/{cfg.EPOCHS}  train_loss={avg_loss:.6f}")
+            print(f"  >> Volume-level 評估（KKI01~05 各自計算）:")
+            avg_p, avg_s, avg_n = evaluate_per_subject(
+                model, device, use_wavelet=False)
 
-            if p > best_psnr:
-                best_psnr = p
+            if avg_p > best_psnr:
+                best_psnr = avg_p
                 ckpt = os.path.join(cfg.SAVE_DIR, "dced_best.pth")
                 torch.save({'epoch': epoch,
                             'model_state': model.state_dict(),
                             'optimizer_state': optimizer.state_dict(),
-                            'psnr': p}, ckpt)
-                print(f"  ★ 新最佳 PSNR={p:.2f} dB → 儲存至 {ckpt}")
+                            'psnr': avg_p}, ckpt)
+                print(f"  ★ 新最佳 PSNR={avg_p:.2f} dB → 儲存至 {ckpt}\n")
+            else:
+                print()
         else:
-            print(f"Epoch {epoch}/{cfg.EPOCHS}  loss={avg_loss:.6f}")
+            print(f"Epoch {epoch}/{cfg.EPOCHS}  train_loss={avg_loss:.6f}")
 
         if epoch % cfg.SAVE_EVERY == 0:
             ckpt = os.path.join(cfg.SAVE_DIR, f"dced_epoch{epoch}.pth")
@@ -222,15 +205,19 @@ def main():
                         'optimizer_state': optimizer.state_dict()}, ckpt)
 
     # ── 最終評估 ──
-    print("\n=== 最終 Volume-level 評估（不含 Wavelet Fusion）===")
-    evaluate_volume(model, device, use_wavelet=False)
+    print("\n" + "="*60)
+    print("最終評估結果（對應論文 Table 3）")
+    print("="*60)
 
-    print("\n=== 最終 Volume-level 評估（含 3D Wavelet Fusion）===")
-    evaluate_volume(model, device, use_wavelet=True)
+    print("\n[不含 Wavelet Fusion]")
+    evaluate_per_subject(model, device, use_wavelet=False)
+
+    print("\n[含 3D Wavelet Fusion]")
+    evaluate_per_subject(model, device, use_wavelet=True)
 
 
 # ─────────────────────────────────────────────
-# 推論模式（單獨使用）
+# 推論模式
 # ─────────────────────────────────────────────
 
 def infer(checkpoint_path: str):
@@ -239,7 +226,7 @@ def infer(checkpoint_path: str):
     ckpt = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(ckpt['model_state'])
     model.eval()
-    print(f"載入 checkpoint: {checkpoint_path}")
+    print(f"載入 checkpoint: {checkpoint_path}  (epoch {ckpt.get('epoch','?')})")
 
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
     nii_files = (glob.glob(os.path.join(cfg.DATA_DIR, "*.nii")) +
@@ -248,7 +235,7 @@ def infer(checkpoint_path: str):
     for fpath in sorted(nii_files):
         fname = os.path.basename(fpath)
         print(f"推論: {fname} ...")
-        img = nib.load(fpath)
+        img   = nib.load(fpath)
         hr_np = normalize(img.get_fdata(dtype=np.float32))
         lr_np = generate_lr(hr_np, scale=cfg.SCALE)
         sr_np = self_ensemble_inference(
@@ -261,5 +248,5 @@ def infer(checkpoint_path: str):
 
 if __name__ == "__main__":
     main()
-    # 若要推論，把上面 main() 換成：
-    # infer(r"C:/Users/user/Desktop/fri/BN5207-Final-Project/checkpoints/dced_best.pth")
+    # 訓練完要推論時，把上面 main() 改成：
+    # infer(r"C:\Users\user\Downloads\Medical-F-Project\Data\Save\dced_best.pth")
