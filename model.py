@@ -85,7 +85,7 @@ class EDB(nn.Module):
         d2 = d2 + e1            # LSC: dec2 ↔ enc1
 
         d3 = self.dec3(d2)
-        d3 = d3 + x             # LSC: dec3 ↔ 輸入
+        # d3 = d3 + x             # LSC: dec3 ↔ 輸入
 
         return d3               # 供 LC 使用
 

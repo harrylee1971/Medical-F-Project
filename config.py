@@ -5,9 +5,9 @@ config.py
 """
 
 # ── 路徑設定 ──────────────────────────────────
-DATA_DIR    = r"C:/Users/user/Desktop/fri/Data/output_file"   # .nii 檔案所在資料夾
-SAVE_DIR    = r"C:/Users/user/Desktop/fri/BN5207-Final-Project/checkpoints"
-OUTPUT_DIR  = r"C:/Users/user/Desktop/fri/BN5207-Final-Project/sr_output"
+DATA_DIR    = r"C:\Users\user\Downloads\Medical-F-Project\Data\output_folder"   # .nii 檔案所在資料夾
+SAVE_DIR    = r"C:\Users\user\Downloads\Medical-F-Project\Data\Save"
+OUTPUT_DIR  = r"C:\Users\user\Downloads\Medical-F-Project\Data\Output"
 
 # ── 資料集分割 ────────────────────────────────
 TRAIN_IDS   = list(range(13, 43))   # KKI13 ~ KKI42 (30 筆訓練)
@@ -25,7 +25,7 @@ NUM_FILTERS = 32      # 每層 filter 數
 
 # ── 訓練超參數 ────────────────────────────────
 EPOCHS      = 80
-BATCH_SIZE  = 32
+BATCH_SIZE  = 64
 LR          = 1e-4    # Adam 學習率
 WEIGHT_DECAY= 1e-5    # Adam weight decay
 MOMENTUM    = 0.9
@@ -34,5 +34,5 @@ MOMENTUM    = 0.9
 WAVELET_WEIGHTS = [0.6, 0.1, 0.2, 0.1]
 
 # ── 其他 ──────────────────────────────────────
-EVAL_EVERY  = 5       # 每幾個 epoch 做一次評估
+EVAL_EVERY  = 40       # 每幾個 epoch 做一次評估
 SAVE_EVERY  = 20      # 每幾個 epoch 存一次 checkpoint

@@ -72,7 +72,7 @@ axes[3].axis('off')
 plt.suptitle(f'LR/HR 品質確認  |  PSNR(LR)={psnr:.2f} dB  |  MAE={diff.mean():.4f}',
              fontsize=13)
 plt.tight_layout()
-out = 'check_lr_hr.png'
+out = 'C:\\Users\\user\\Downloads\\Medical-F-Project\\check_lr_hr.png'
 plt.savefig(out, dpi=150, bbox_inches='tight')
 print(f"\n圖片已儲存：{out}")
 print("請確認 LR 比 HR 模糊/損失細節 —— 若兩者幾乎一樣則 scale 或 sigma 設定有問題")
