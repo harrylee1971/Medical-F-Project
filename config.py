@@ -16,7 +16,7 @@ TEST_IDS    = list(range(1, 6))     # KKI01 ~ KKI05  (5 筆測試)
 # ── 資料前處理 ────────────────────────────────
 SCALE       = 2       # 超解析度倍率
 PATCH_SIZE  = 31      # 3D patch 邊長
-OVERLAP     = 16      # patch 重疊像素
+OVERLAP     = 8      # patch 重疊像素
 
 # ── 模型架構 ──────────────────────────────────
 IN_CHANNELS = 1       # MRI 單通道

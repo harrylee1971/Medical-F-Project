@@ -64,6 +64,7 @@ class EDB(nn.Module):
         self.enc1 = nn.Sequential(conv3d(channels, channels, dilation=2), nn.ReLU(inplace=True))
         self.enc2 = nn.Sequential(conv3d(channels, channels, dilation=2), nn.ReLU(inplace=True))
         self.enc3 = nn.Sequential(conv3d(channels, channels, dilation=2), nn.ReLU(inplace=True))
+        self.enc4 = nn.Sequential(conv3d(channels, channels, dilation=2), nn.ReLU(inplace=True))
 
         # ── Decoders (deconv, stride=1) ──
         self.dec1 = nn.Sequential(deconv3d(channels, channels), nn.ReLU(inplace=True))
@@ -76,6 +77,7 @@ class EDB(nn.Module):
         e1 = self.enc1(x)
         e2 = self.enc2(e1)
         e3 = self.enc3(e2)
+        # e3 = self.enc4(e3)
 
         # ── Decoding with LSC (element-wise addition) ──
         d1 = self.dec1(e3)      # 對應 e3
@@ -85,7 +87,7 @@ class EDB(nn.Module):
         d2 = d2 + e1            # LSC: dec2 ↔ enc1
 
         d3 = self.dec3(d2)
-        # d3 = d3 + x             # LSC: dec3 ↔ 輸入
+        d3 = d3 + x             # LSC: dec3 ↔ 輸入
 
         return d3               # 供 LC 使用
 

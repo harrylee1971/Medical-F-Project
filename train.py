@@ -167,13 +167,26 @@ def main():
                            lr=cfg.LR,
                            weight_decay=cfg.WEIGHT_DECAY,
                            betas=(cfg.MOMENTUM, 0.999))
+    # ── Resume 設定 ──
+    resume_path = os.path.join(cfg.SAVE_DIR, "dced_epoch60.pth")  # ← 改這裡
 
+    start_epoch = 60
+
+    if os.path.isfile(resume_path):
+        print(f"\n載入 checkpoint: {resume_path}")
+        checkpoint = torch.load(resume_path, map_location=device)
+
+        model.load_state_dict(checkpoint['model_state'])
+        optimizer.load_state_dict(checkpoint['optimizer_state'])
+
+        start_epoch = checkpoint['epoch'] + 1  # ← 重點：從60接61
+        print(f"從 epoch {start_epoch} 繼續訓練\n")
     os.makedirs(cfg.SAVE_DIR, exist_ok=True)
     best_psnr = 0.0
 
     # ── 訓練迴圈 ──
     print(f"\n開始訓練（共 {cfg.EPOCHS} epochs）...\n")
-    for epoch in range(1, cfg.EPOCHS + 1):
+    for epoch in range(start_epoch, cfg.EPOCHS + 1):
 
         avg_loss = train_one_epoch(
             model, train_loader, optimizer, criterion, device, epoch)
