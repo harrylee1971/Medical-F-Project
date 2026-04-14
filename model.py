@@ -81,13 +81,13 @@ class EDB(nn.Module):
 
         # ── Decoding with LSC (element-wise addition) ──
         d1 = self.dec1(e3)      # 對應 e3
-        d1 = d1 + e2            # LSC: dec1 ↔ enc2
+        # d1 = d1 + e2            # LSC: dec1 ↔ enc2
 
         d2 = self.dec2(d1)
-        d2 = d2 + e1            # LSC: dec2 ↔ enc1
+        # d2 = d2 + e1            # LSC: dec2 ↔ enc1
 
         d3 = self.dec3(d2)
-        d3 = d3 + x             # LSC: dec3 ↔ 輸入
+        # d3 = d3 + x             # LSC: dec3 ↔ 輸入
 
         return d3               # 供 LC 使用
 
